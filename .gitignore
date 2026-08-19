@@ -1,0 +1,24 @@
+# 機密
+.env
+.env.local
+
+# 實際使用的詞表與判讀背景（含機構當前輿情，不公開）
+config/lexicon/*.local.txt
+config/context.local.md
+
+# 資料與輸出
+data/
+*.db
+*.sqlite3
+*.xlsx
+*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# macOS
+.DS_Store
