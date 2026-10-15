@@ -23,6 +23,7 @@ ROOT="$PWD"
 SMC="$ROOT/.venv/bin/smc"
 PY="$ROOT/.venv/bin/python"
 RESCAN_STAMP="$ROOT/data/.last-full-rescan"
+REPORT_STAMP="$ROOT/data/.last-report"
 RESCAN_MAX_DAYS=90        # 差異重掃的死角由每季一次的全量重掃兜底
 
 SINCE=""
@@ -70,21 +71,18 @@ run_smc() {
 say "更新開始　$(date '+%Y-%m-%d %H:%M')　日誌：${LOG#$ROOT/}"
 run_smc "狀態檢查" status
 
-# ── 報表區間：自資料庫最新貼文往回 3 天，避免邊界切在某則貼文上 ──
+# ── 報表區間 ──
+# 不可用「資料庫最新貼文往回 N 天」推算：同步成功後最新貼文就是今天，
+# 報表會縮成「只看最近三天」。改以上次產表日為起點，才是真正的「這次新增」。
 if [[ -z "$SINCE" ]]; then
-  SINCE="$("$PY" - <<'PYEOF'
-import sqlite3, datetime, pathlib
-db = pathlib.Path("data/comments.db")
-if not db.exists():
-    print(""); raise SystemExit
-row = sqlite3.connect(db).execute("select max(created_time) from posts").fetchone()[0]
-if not row:
-    print(""); raise SystemExit
-print((datetime.date.fromisoformat(str(row)[:10]) - datetime.timedelta(days=3)).isoformat())
-PYEOF
-)"
-  [[ -n "$SINCE" ]] || die "無法推算報表區間，請用 --since 指定"
-  info "報表區間起點（自動推算，已含 3 天重疊）：${SINCE}"
+  if [[ -f "$REPORT_STAMP" ]]; then
+    SINCE="$(cat "$REPORT_STAMP")"
+    info "報表區間起點（上次產表日）：${SINCE}"
+  else
+    SINCE="$("$PY" -c "import datetime;print((datetime.date.today()-datetime.timedelta(days=90)).isoformat())")"
+    warn "查無上次產表紀錄，改用近 90 天：${SINCE}"
+    warn "要涵蓋全部存量請改用：--since 2015-01-01"
+  fi
 fi
 
 # ── 步驟 1：刷新全部貼文 ──
@@ -138,8 +136,9 @@ run_smc "classify" classify
 
 REPORT="data/reports/需關注留言_$(date +%Y%m%d).xlsx"
 run_smc "report" report --since "$SINCE" --output "$REPORT"
+date +%F > "$REPORT_STAMP"
 
 say "完成"
-info "報表：${REPORT}"
+info "報表：${REPORT}（區間 ${SINCE} 起）"
 info "日誌：${LOG#$ROOT/}"
 [[ -f "$RESCAN_STAMP" ]] && info "上次全量重掃：$(cat "$RESCAN_STAMP")"
