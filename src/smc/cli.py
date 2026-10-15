@@ -314,14 +314,28 @@ def _within_tolerance(expected: int, actual: int) -> bool:
     return expected > 0 and diff / expected <= RECONCILE_PCT_TOLERANCE
 
 
+def _fetch_mode(full_rescan: bool, changed_only: bool) -> str:
+    """供 sync_runs.note 標示本次選取模式，日後查涵蓋範圍時可區分。"""
+    if full_rescan:
+        return "全量重掃"
+    return "差異重掃" if changed_only else "增量"
+
+
 @fetch_app.command("comments")
 def fetch_comments(
     post_id: str = typer.Option(None, "--post-id", help="只抓單一貼文"),
     full_rescan: bool = typer.Option(False, "--full-rescan", help="忽略 checkpoint 全量重掃"),
+    changed_only: bool = typer.Option(
+        False, "--changed-only",
+        help="只抓 FB 回報留言數與本地不符者（須先 fetch posts 刷新計數）",
+    ),
     max_posts: int = typer.Option(None, "--max-posts", help="最多處理 N 則貼文"),
     dry_run: bool = typer.Option(False, "--dry-run", help="只抓取不寫入"),
 ) -> None:
     """擷取留言與回覆（含隱藏留言），逐則貼文 checkpoint 以支援中斷續跑。"""
+    if full_rescan and changed_only:
+        err_console.print("[red]--full-rescan 與 --changed-only 不可併用[/red]")
+        raise typer.Exit(Exit.CONFIG)
     s = get_settings()
     if missing := s.missing_for_fetch():
         err_console.print(f"[red]設定缺漏[/red]：{', '.join(missing)}")
@@ -339,7 +353,9 @@ def fetch_comments(
     init_schema(engine)
 
     with session_scope(engine) as session:
-        posts = repo.posts_to_fetch_comments(session, full_rescan=full_rescan, post_id=post_id)
+        posts = repo.posts_to_fetch_comments(
+            session, full_rescan=full_rescan, changed_only=changed_only, post_id=post_id
+        )
     if max_posts:
         posts = posts[:max_posts]
     if not posts:
@@ -362,7 +378,7 @@ def fetch_comments(
         with session_scope(engine) as session:
             run_id = repo.start_sync_run(
                 session, kind="comments", since=None, until=None, started_at=started_at,
-                note=f"{'全量重掃' if full_rescan else '增量'}，{len(posts)} 則貼文",
+                note=f"{_fetch_mode(full_rescan, changed_only)}，{len(posts)} 則貼文",
             ).id
 
     stats = {"posts": 0, "inserted": 0, "updated": 0, "hidden": 0, "replies": 0}

@@ -6,6 +6,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from sqlalchemy import or_
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlmodel import Session, func, select
 
@@ -110,16 +111,43 @@ def mark_post_comments_synced(session: Session, post_id: str, when: datetime) ->
 
 
 def posts_to_fetch_comments(
-    session: Session, *, full_rescan: bool = False, post_id: str | None = None
+    session: Session,
+    *,
+    full_rescan: bool = False,
+    changed_only: bool = False,
+    post_id: str | None = None,
 ) -> list[Post]:
     """回傳需要擷取留言的貼文。
 
     僅取 comments_count > 0 者 —— 對無留言的貼文呼叫 API 是純粹浪費，
     以本粉專實測可省下 1,934 次呼叫（4,145 則貼文中僅 2,211 則有留言）。
+
+    三種選取模式：
+
+    - 預設（增量）：只取從未抓過留言者。**舊貼文的新留言抓不到。**
+    - ``changed_only``：另取 FB 回報留言數與本地頂層留言數不符者。
+      先以 ``fetch posts`` 刷新 ``comments_count``（約 42 次呼叫）再用此模式，
+      可把 2,211 次留言呼叫壓到實際有變動的數十則。
+    - ``full_rescan``：全部重抓，不看任何狀態。
+
+    ``changed_only`` 的已知死角：同一則貼文新增一則又刪除一則時總數不變，
+    因而被跳過。故仍須定期（建議每季）執行一次 ``full_rescan`` 作為安全網。
+    另依 §7.5，``comments_count`` 與實抓數偶有誤差，此類貼文會被反覆選中；
+    代價僅是多抓，不影響正確性。
     """
     stmt = select(Post).where(Post.comments_count > 0)
     if post_id:
         stmt = select(Post).where(Post.id == post_id)
+    elif changed_only:
+        local_top_level = (
+            select(func.count())
+            .select_from(Comment)
+            .where(Comment.post_id == Post.id, Comment.parent_id.is_(None))
+            .scalar_subquery()
+        )
+        stmt = stmt.where(
+            or_(Post.comments_synced_at.is_(None), Post.comments_count != local_top_level)
+        )
     elif not full_rescan:
         stmt = stmt.where(Post.comments_synced_at.is_(None))
     return list(session.exec(stmt.order_by(Post.created_time.desc())).all())

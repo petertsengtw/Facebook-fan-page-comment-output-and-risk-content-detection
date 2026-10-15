@@ -95,6 +95,65 @@ def test_posts_to_fetch_excludes_synced_and_zero_comment_posts(engine):
         assert [p.id for p in repo.posts_to_fetch_comments(session, post_id="A")] == ["A"]
 
 
+def _cmt(cid: str, post_id: str, *, parent: str | None = None) -> dict:
+    from smc.util.hashing import message_hash
+    return {
+        "id": cid, "post_id": post_id, "parent_id": parent,
+        "author_id": None, "author_name_hash": None, "author_name": None,
+        "message": cid, "message_hash": message_hash(cid),
+        "created_time": datetime(2026, 8, 15, 10, 0),
+        "like_count": 0, "reply_count": 0,
+        "permalink_url": f"https://fb.com/{cid}", "attachment_type": None,
+        "is_hidden": False, "fetched_at": FETCHED, "raw_json": None,
+    }
+
+
+def test_changed_only_selects_posts_whose_comment_count_moved(engine):
+    """差異重掃的核心：FB 回報留言數與本地頂層留言數不符者才需重抓。
+
+    這是把每月 2,211 次留言呼叫壓到實際有變動者的依據；選錯會讓舊貼文的
+    新留言靜默漏失，與不加 --full-rescan 的後果相同。
+    """
+    with session_scope(engine) as session:
+        repo.upsert_posts(session, [
+            _post("same", comments=2),     # 本地已有 2 則頂層 → 不需重抓
+            _post("grew", comments=5),     # 本地僅 1 則 → FB 多出 4 則，需重抓
+            _post("never", comments=3),    # 從未同步 → 一律需重抓
+            _post("zero", comments=0),     # 零留言 → 任何模式都不碰
+        ])
+        repo.upsert_comments(session, [
+            _cmt("s1", "same"), _cmt("s2", "same"),
+            _cmt("g1", "grew"),
+        ])
+    with session_scope(engine) as session:
+        for pid in ("same", "grew"):
+            session.get(Post, pid).comments_synced_at = FETCHED
+
+    with session_scope(engine) as session:
+        got = {p.id for p in repo.posts_to_fetch_comments(session, changed_only=True)}
+        assert got == {"grew", "never"}, "只該選出計數不符者與未同步者"
+
+
+def test_changed_only_ignores_replies_when_counting(engine):
+    """FB 的 comments_count 是頂層留言數（含隱藏、不含回覆，見 §7.5）。
+
+    若把回覆也算進本地計數，有回覆的貼文會永遠被判定為「已多抓」而漏選，
+    這類漏失同樣沒有任何徵兆。
+    """
+    with session_scope(engine) as session:
+        repo.upsert_posts(session, [_post("p", comments=2)])
+        repo.upsert_comments(session, [
+            _cmt("t1", "p"), _cmt("t2", "p"),          # 2 則頂層 → 與 FB 相符
+            _cmt("r1", "p", parent="t1"),              # 回覆不該計入
+            _cmt("r2", "p", parent="t1"),
+        ])
+    with session_scope(engine) as session:
+        session.get(Post, "p").comments_synced_at = FETCHED
+
+    with session_scope(engine) as session:
+        assert repo.posts_to_fetch_comments(session, changed_only=True) == []
+
+
 def test_upsert_empty_list_is_noop(engine):
     with session_scope(engine) as session:
         assert repo.upsert_posts(session, []).total == 0

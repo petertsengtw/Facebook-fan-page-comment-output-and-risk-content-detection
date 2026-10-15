@@ -340,7 +340,21 @@ GET /{version}/{post-id}/comments
 ```
 - `filter=stream`：**扁平化**回傳所有留言與回覆（含巢狀），可省去逐則抓 replies。`parent.id` 用以還原樹狀結構。
 - `order=chronological`：分頁游標穩定，配合增量同步。
-- 增量策略：以 `order=reverse_chronological` 抓取直到遇見 `created_time <= comments_synced_at` 之留言即停止（需注意舊留言仍可能有新回覆，故每 N 天做一次該貼文的全量重掃，`--full-rescan`）。
+- 增量策略（**實作與原規劃不同，以此為準**）：原規劃為逐則貼文以 `reverse_chronological`
+  抓到 checkpoint 即停。實作上 `list_comments` 未帶時間參數，**每則貼文一律整串重抓**；
+  `comments_synced_at` 僅用於決定「要不要造訪這則貼文」，不限制貼文內的抓取範圍。
+  因 Graph API 不計費，此差異的代價是時間而非金錢，故未改回原設計。
+- 貼文選取有三種模式，差別在於**哪些貼文會被造訪**：
+
+  | 模式 | 選取範圍 | 本粉專實測 | 用途 |
+  | --- | --- | --- | --- |
+  | 預設（增量） | `comments_synced_at IS NULL` | 1 則 | 僅新貼文。**舊貼文的新留言抓不到** |
+  | `--changed-only` | 上列 ∪「FB 回報留言數 ≠ 本地頂層留言數」 | 176 則 | 例行更新。須先 `fetch posts --all` 刷新計數 |
+  | `--full-rescan` | 全部有留言的貼文 | 2,211 則 | 安全網 |
+
+  `--changed-only` 的比對基準為 §7.5 的頂層留言數（含隱藏、不含回覆）。
+  已知死角：同一則貼文新增一則又刪除一則時總數不變而被跳過，
+  故仍須定期（建議每季）執行 `--full-rescan`。例行流程見 `scripts/monthly-update.sh`。
 - 空內文留言（純貼圖）保留，`message` 存空字串，分類階段直接標 `no_text` 跳過 LLM。
 
 ### 7.4 速率限制與退避
